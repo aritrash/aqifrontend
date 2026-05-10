@@ -6,24 +6,17 @@
 // DOM Elements
 // -----------------------------------------
 const elements = {
-    // Main Hero
     aqiValue: document.getElementById('aqi-value'),
     aqiCategory: document.getElementById('aqi-category'),
-    aqiIconContainer: document.querySelector('.aqi-icon'),
+    aqiIconContainer: document.querySelector('.aqi-icon'), // Fixed for Lucide regeneration
     aqiProgressBar: document.getElementById('aqi-progress-bar'),
-    
-    // Environment
     tempValue: document.getElementById('temp-value'),
     humidityValue: document.getElementById('humidity-value'),
-    
-    // Raw Values (Now in Advanced Section)
     pm25Value: document.getElementById('pm25-value'),
     pm10Value: document.getElementById('pm10-value'),
     pm25ActualValue: document.getElementById('pm25-actual-value'),
     rawAvg: document.getElementById('raw-avg'),
     rawVar: document.getElementById('raw-var'),
-    
-    // System & Nav
     statusIndicator: document.getElementById('status-indicator'),
     statusText: document.getElementById('status-text'),
     lastUpdated: document.getElementById('last-updated'),
@@ -43,23 +36,29 @@ let config = {
     pollInterval: 1000, 
     timer: null,
     activePollutant: 'PM2.5',
+    activeTimeframe: '1H', // Tracks the active graph view
     latestData: null,
-    envUpdateTick: 0  // NEW: Counter to throttle the environment updates
+    envUpdateTick: 0 // Throttles temp/humidity updates
 };
 
-// Chart & Buffer State
-let chartConfig = {
-    mode: 60,            // Default to 1 Hour (60 minutes)
-    maxPoints: 60,       // Points on the graph
-    secondsToBuffer: 60  // Seconds to wait before plotting a point (1 min)
-};
-
-// Independent storage for all three metrics (Continuous Background Tracking)
+// -----------------------------------------
+// DUAL MEMORY BANKS (Tracks 1H and 6H continuously)
+// -----------------------------------------
 let historyState = {
-    labels: Array(chartConfig.maxPoints).fill(''),
-    'PM2.5': { data: Array(chartConfig.maxPoints).fill(null), buffer: [] },
-    'PM10':  { data: Array(chartConfig.maxPoints).fill(null), buffer: [] },
-    'PM25':  { data: Array(chartConfig.maxPoints).fill(null), buffer: [] }
+    '1H': {
+        secondsToBuffer: 60, // 1 min per point
+        labels: Array(60).fill(''),
+        'PM2.5': { data: Array(60).fill(null), buffer: [] },
+        'PM10':  { data: Array(60).fill(null), buffer: [] },
+        'PM25':  { data: Array(60).fill(null), buffer: [] }
+    },
+    '6H': {
+        secondsToBuffer: 300, // 5 mins per point
+        labels: Array(72).fill(''),
+        'PM2.5': { data: Array(72).fill(null), buffer: [] },
+        'PM10':  { data: Array(72).fill(null), buffer: [] },
+        'PM25':  { data: Array(72).fill(null), buffer: [] }
+    }
 };
 
 let aqiChartInstance = null;
@@ -73,7 +72,7 @@ initChart();
 startPolling();
 
 // -----------------------------------------
-// AQI Calculation Engine (CPCB Guidelines)
+// AQI Calculation Engine
 // -----------------------------------------
 function calculateAQI(concentration, pollutant) {
     if (concentration === undefined || concentration === null) return { value: "--", category: "WAITING" };
@@ -81,9 +80,7 @@ function calculateAQI(concentration, pollutant) {
     let breakpoints = [];
     
     if (pollutant === 'PM2.5') {
-        if (concentration > 250) {
-            return { value: Math.round(400 + (100/130) * (concentration - 250)), category: 'SEVERE' };
-        }
+        if (concentration > 250) return { value: Math.round(400 + (100/130) * (concentration - 250)), category: 'SEVERE' };
         breakpoints = [
             { BPLo: 0, BPHi: 30, ILo: 0, IHi: 50, category: 'GOOD' },
             { BPLo: 31, BPHi: 60, ILo: 51, IHi: 100, category: 'SATISFACTORY' },
@@ -92,9 +89,7 @@ function calculateAQI(concentration, pollutant) {
             { BPLo: 121, BPHi: 250, ILo: 301, IHi: 400, category: 'VERY POOR' }
         ];
     } else if (pollutant === 'PM10') {
-        if (concentration > 430) {
-            return { value: Math.round(400 + (100/70) * (concentration - 430)), category: 'SEVERE' }; 
-        }
+        if (concentration > 430) return { value: Math.round(400 + (100/70) * (concentration - 430)), category: 'SEVERE' }; 
         breakpoints = [
             { BPLo: 0, BPHi: 50, ILo: 0, IHi: 50, category: 'GOOD' },
             { BPLo: 51, BPHi: 100, ILo: 51, IHi: 100, category: 'SATISFACTORY' },
@@ -103,18 +98,15 @@ function calculateAQI(concentration, pollutant) {
             { BPLo: 351, BPHi: 430, ILo: 301, IHi: 400, category: 'VERY POOR' }
         ];
     } else {
-        // PM25 has no standard AQI breakpoints, display raw value
         return { value: Math.round(concentration), category: 'RAW VALUE' };
     }
 
-    // Apply Linear Interpolation Formula: Ip = [(IHi - ILo) / (BPHi - BPLo)] * (Cp - BPLo) + ILo
     for (let bp of breakpoints) {
         if (concentration >= bp.BPLo && concentration <= bp.BPHi) {
             const aqi = ((bp.IHi - bp.ILo) / (bp.BPHi - bp.BPLo)) * (concentration - bp.BPLo) + bp.ILo;
             return { value: Math.round(aqi), category: bp.category };
         }
     }
-    
     return { value: "--", category: "WAITING" };
 }
 
@@ -126,10 +118,10 @@ function initChart() {
     aqiChartInstance = new Chart(ctx, {
         type: 'line',
         data: {
-            labels: historyState.labels,
+            labels: historyState['1H'].labels,
             datasets: [{
                 label: 'Selected AQI Value',
-                data: historyState[config.activePollutant].data, // Bind to active pollutant
+                data: historyState['1H'][config.activePollutant].data, 
                 borderColor: '#00ffff',
                 backgroundColor: 'rgba(0, 255, 255, 0.1)',
                 borderWidth: 2,
@@ -165,7 +157,7 @@ function initChart() {
 // Event Setup (Buttons & Toggles)
 // -----------------------------------------
 function setupSelectors() {
-    // Pollutant Selectors (PM2.5, PM10, PM25)
+    // Pollutant Selectors
     elements.pollutantBtns.forEach(btn => {
         btn.addEventListener('click', (e) => {
             elements.pollutantBtns.forEach(b => b.classList.remove('active'));
@@ -173,41 +165,27 @@ function setupSelectors() {
             
             config.activePollutant = e.target.getAttribute('data-pollutant');
             
-            // Swap chart's data pointer to the selected history bank (No wiping!)
             if (aqiChartInstance) {
-                aqiChartInstance.data.datasets[0].data = historyState[config.activePollutant].data;
+                aqiChartInstance.data.datasets[0].data = historyState[config.activeTimeframe][config.activePollutant].data;
                 aqiChartInstance.update();
             }
-            
             if (config.latestData) updateUI(config.latestData);
         });
     });
 
-    // Timeframe Selectors (1H vs 6H)
+    // Timeframe Selectors (NO MORE WIPING DATA!)
     document.querySelectorAll('.time-btn').forEach(btn => {
         btn.addEventListener('click', (e) => {
             document.querySelectorAll('.time-btn').forEach(b => b.classList.remove('active'));
             e.target.classList.add('active');
             
             const minutes = parseInt(e.target.getAttribute('data-time'));
-            if (minutes === 60) {
-                chartConfig.secondsToBuffer = 60; // 1 avg point every minute
-                chartConfig.maxPoints = 60;       // 60 points total = 1 hour
-            } else if (minutes === 360) {
-                chartConfig.secondsToBuffer = 300; // 1 avg point every 5 mins
-                chartConfig.maxPoints = 72;        // 72 points total = 6 hours
-            }
+            config.activeTimeframe = minutes === 60 ? '1H' : '6H';
 
-            // Reset ALL memory banks because the timeframe scale changed
-            historyState.labels = Array(chartConfig.maxPoints).fill('');
-            ['PM2.5', 'PM10', 'PM25'].forEach(key => {
-                historyState[key].data = Array(chartConfig.maxPoints).fill(null);
-                historyState[key].buffer = [];
-            });
-            
+            // Just swap the view to the other memory bank
             if (aqiChartInstance) {
-                aqiChartInstance.data.labels = historyState.labels;
-                aqiChartInstance.data.datasets[0].data = historyState[config.activePollutant].data;
+                aqiChartInstance.data.labels = historyState[config.activeTimeframe].labels;
+                aqiChartInstance.data.datasets[0].data = historyState[config.activeTimeframe][config.activePollutant].data;
                 aqiChartInstance.update();
             }
         });
@@ -258,27 +236,26 @@ function setConnectionStatus(isConnected) {
 // UI Rendering & Continuous Tracking
 // -----------------------------------------
 function updateUI(data) {
-    // Populate Raw Value Cards (Updates every 1s)
+    // 1-Second Raw Updates
     elements.pm25Value.textContent = data.pm2_5;
     elements.pm10Value.textContent = data.pm10;
     elements.pm25ActualValue.textContent = data.pm25;
     elements.rawAvg.textContent = data.features?.avg || data.avg || '--';
     elements.rawVar.textContent = data.features?.variance || data.variance || '--';
     
-    // --- NEW: Throttled Environment Updates (Every 2s) ---
+    // Throttled 2-Second Env Updates
     config.envUpdateTick++;
     if (config.envUpdateTick % 2 === 0) {
         elements.tempValue.textContent = data.env?.temp?.toFixed(1) || data.temperature?.toFixed(1) || '--';
         elements.humidityValue.textContent = data.env?.humidity?.toFixed(1) || data.humidity?.toFixed(1) || '--';
         
-        // Flash animation just for temp/humidity
         [elements.tempValue, elements.humidityValue].forEach(el => {
             el.classList.add('updated');
             setTimeout(() => el.classList.remove('updated'), 500);
         });
     }
     
-    // --- CONTINUOUS BACKGROUND TRACKING LOGIC ---
+    // --- CONTINUOUS BACKGROUND TRACKING LOGIC (1H and 6H) ---
     if (aqiChartInstance) {
         const streams = [
             { key: 'PM2.5', raw: data.pm2_5 },
@@ -289,38 +266,48 @@ function updateUI(data) {
         streams.forEach(stream => {
             const result = calculateAQI(stream.raw, stream.key);
             
-            // Update main hero UI text for the *active* pollutant
             if (stream.key === config.activePollutant) {
                 elements.aqiValue.textContent = result.value;
                 elements.aqiCategory.textContent = result.category;
                 updateAQIStyle(result.value, result.category);
             }
             
-            // Store the data in the background buffer
             if (result.value !== "--") {
-                historyState[stream.key].buffer.push(result.value);
+                // Feeds the data into BOTH the 1H and 6H memory banks simultaneously!
+                ['1H', '6H'].forEach(tf => {
+                    let tfState = historyState[tf];
+                    let streamState = tfState[stream.key];
+                    
+                    streamState.buffer.push(result.value);
 
-                if (historyState[stream.key].data.every(val => val === null)) {
-                    historyState[stream.key].data[chartConfig.maxPoints - 1] = result.value;
-                }
+                    // Left-to-Right starting point
+                    if (streamState.data.every(val => val === null)) {
+                        streamState.data[0] = result.value;
+                    }
 
-                if (historyState[stream.key].buffer.length >= chartConfig.secondsToBuffer) {
-                    const average = historyState[stream.key].buffer.reduce((a, b) => a + b, 0) / historyState[stream.key].buffer.length;
-                    historyState[stream.key].data.push(Math.round(average));
-                    historyState[stream.key].data.shift(); 
-                    historyState[stream.key].buffer = []; 
-                }
+                    if (streamState.buffer.length >= tfState.secondsToBuffer) {
+                        const average = streamState.buffer.reduce((a, b) => a + b, 0) / streamState.buffer.length;
+                        
+                        // Left-to-Right filling logic
+                        const firstEmptySlot = streamState.data.indexOf(null);
+                        if (firstEmptySlot !== -1) {
+                            streamState.data[firstEmptySlot] = Math.round(average);
+                        } else {
+                            streamState.data.push(Math.round(average));
+                            streamState.data.shift(); 
+                        }
+                        streamState.buffer = []; 
+                    }
+                });
             }
         });
 
         aqiChartInstance.update();
     }
 
-    // Timestamp
     const now = new Date();
     elements.lastUpdated.textContent = `Last update: ${now.toLocaleTimeString()}`;
     
-    // Visual Flash for the fast 1-second metrics
     const fastMetrics = [elements.aqiValue, elements.pm25Value, elements.pm10Value, elements.pm25ActualValue];
     fastMetrics.forEach(el => {
         el.classList.add('updated');
@@ -329,51 +316,45 @@ function updateUI(data) {
 }
 
 // -----------------------------------------
-// Styling Helpers
+// Styling Helpers (Vibrant Colors Fixed)
 // -----------------------------------------
 function updateAQIStyle(value, category) {
     let color = '#a0aec0'; 
     let icon = 'help-circle';
     let progress = 0;
 
-    // Calculate how wide the progress bar should be
     if (value !== "--") {
         progress = Math.min((value / 500) * 100, 100);
     }
 
-    // Set the vibrant colors and icons based on CPCB categories
     if (category.includes('GOOD')) {
-        color = '#00e676'; // Pure Vibrant Green
+        color = '#00e676'; 
         icon = 'smile';
     } else if (category.includes('SATISFACTORY')) {
-        color = '#b2ff59'; // Light Lime Green
+        color = '#b2ff59'; 
         icon = 'smile';
     } else if (category.includes('MODERATE')) {
-        color = '#fee440'; // Yellow
+        color = '#fee440'; 
         icon = 'meh';
     } else if (category.includes('POOR') && !category.includes('VERY')) {
-        color = '#f4a261'; // Orange
+        color = '#f4a261'; 
         icon = 'frown';
     } else if (category.includes('VERY POOR')) {
-        color = '#e76f51'; // Red-Orange
+        color = '#e76f51'; 
         icon = 'frown';
     } else if (category.includes('SEVERE')) {
-        color = '#ff4d6d'; // Bright Red
+        color = '#ff4d6d'; 
         icon = 'alert-triangle';
     } else if (category === 'RAW VALUE') {
-        color = '#00ffff'; // Cyan for raw data
+        color = '#00ffff'; 
         icon = 'database';
         progress = Math.min((value / 100) * 100, 100); 
     }
 
-    // 1. Apply color to the Text Category
     elements.aqiCategory.style.color = color;
-    
-    // 2. Apply width and solid background color to the Progress Bar
     elements.aqiProgressBar.style.width = `${progress}%`;
     elements.aqiProgressBar.style.backgroundColor = color;
     
-    // 3. Inject and render the Mood Icon
     if (elements.aqiIconContainer) {
         elements.aqiIconContainer.innerHTML = `<i data-lucide="${icon}" size="48"></i>`;
         lucide.createIcons();
@@ -406,15 +387,13 @@ window.addEventListener('keydown', (e) => {
 // =========================================
 // UI DESIGNER TEST MODE
 // =========================================
-// UNCOMMENT the "runMockTest();" line below to see the dashboard animate 
-// without needing the .exe simulator!
-
 function runMockTest() {
     console.log("🛠️ Running in Mock UI Test Mode...");
     if (config.timer) clearInterval(config.timer);
     
-    // Force graph to draw quickly for visual testing
-    chartConfig.secondsToBuffer = 1; 
+    // Override buffer times so you can see it move fast during testing!
+    //historyState['1H'].secondsToBuffer = 1; // 1H updates every 1 second
+    //historyState['6H'].secondsToBuffer = 2; // 6H updates every 2 seconds
     
     setInterval(() => {
         const basePM25 = 80 + (Math.sin(Date.now() / 10000) * 40); 
